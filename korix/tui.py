@@ -2,6 +2,7 @@ import curses
 import os
 import textwrap
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 from .actions import (
     ActionSpec,
@@ -14,9 +15,8 @@ from .actions import (
     scale_deployment,
     uncordon_node,
 )
-from .codex_client import CodexClient
 from .commands import build_kubectl_command, build_scoped_command, render_command
-from .config import load_codex_config
+from .config import LLMConfig, load_llm_config
 from .constants import DEFAULT_NAMESPACE
 from .dashboard import (
     DashboardService,
@@ -27,11 +27,26 @@ from .dashboard import (
     OverviewMetric,
     PodRow,
 )
-from .errors import CodexError, KubectlError, TranslationError
+from .errors import KubectlError, LLMError, TranslationError
 from .kubectl import KubectlClient
+from .llm import (
+    DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+    SUPPORTED_PROVIDERS,
+    build_provider,
+    test_provider_connection,
+)
 from .translation import Translator
 
-SECTION_ORDER = ["Overview", "Pods", "Deployments", "Nodes", "Events", "Namespaces", "Actions"]
+SECTION_ORDER = [
+    "Overview",
+    "Pods",
+    "Deployments",
+    "Nodes",
+    "Events",
+    "Namespaces",
+    "LLM",
+    "Actions",
+]
 
 THEME_DEFAULT = {
     "screen_bg": (252, 235),
@@ -62,11 +77,22 @@ THEME_BASIC = {
 }
 
 
-class KubeAgentTUI:
+@dataclass(frozen=True)
+class LLMSettingItem:
+    key: str
+    label: str
+    value: str
+    description: str
+    editable: bool = True
+
+
+class KorixTUI:
     def __init__(self):
         self._kubectl = KubectlClient()
         self._dashboard = DashboardService(self._kubectl)
         self._translator: Translator | None = None
+        self._llm_config: LLMConfig = load_llm_config({})
+        self._llm_error = ""
         self._contexts: list[str] = []
         self._context = ""
         self._namespace = DEFAULT_NAMESPACE
@@ -106,14 +132,29 @@ class KubeAgentTUI:
             self._contexts = self._kubectl.contexts()
             self._context = self._kubectl.current_context() or self._contexts[0]
             try:
-                config = load_codex_config(os.environ)
-                self._translator = Translator(CodexClient(config))
-                self._status_text = "Ready."
-            except CodexError as exc:
-                self._status_text = f"Ready without natural-language mode: {exc}"
+                self._llm_config = load_llm_config(os.environ)
+            except LLMError as exc:
+                self._llm_error = str(exc)
+                self._status_text = f"LLM settings error: {exc}"
+            self._configure_translator()
             self.refresh()
         except KubectlError as exc:
             self._fatal_error = str(exc)
+
+    def _configure_translator(self) -> None:
+        try:
+            self._translator = Translator(build_provider(self._llm_config))
+            self._llm_error = ""
+            if self._status_text.startswith("Starting") or self._status_text.startswith("LLM"):
+                self._status_text = f"LLM ready: {self._llm_provider_summary()}"
+        except LLMError as exc:
+            self._translator = None
+            self._llm_error = str(exc)
+            self._status_text = f"LLM unavailable: {exc}"
+
+    def _llm_provider_summary(self) -> str:
+        model = self._llm_config.model or "no-model"
+        return f"{self._llm_config.provider}/{model}"
 
     def _init_theme(self) -> None:
         if not curses.has_colors():
@@ -178,17 +219,81 @@ class KubeAgentTUI:
             records = ["* all namespaces", "- no default namespace"]
             records.extend(self._snapshot.namespaces)
             return records
+        if section == "LLM":
+            return self._llm_items()
         return [
             "Enter inspect details",
             "g refresh data",
             "C switch context",
             "n switch namespace scope",
             ": natural-language command preview",
+            "LLM: configure provider, model, endpoint, api key, test connection",
             "Pods: d describe, l logs, p previous logs, x delete pod",
             "Deployments: d describe, r restart, s scale",
             "Nodes: d describe, c cordon, u uncordon",
             "q quit",
         ]
+
+    def _llm_items(self) -> list[LLMSettingItem]:
+        items = [
+            LLMSettingItem(
+                key="provider",
+                label="Provider",
+                value=self._llm_config.provider,
+                description=f"Choose one of: {', '.join(SUPPORTED_PROVIDERS)}.",
+            ),
+            LLMSettingItem(
+                key="model",
+                label="Model",
+                value=self._llm_config.model or "(not set)",
+                description="Model name used for natural-language translation.",
+            ),
+        ]
+        if self._llm_config.provider == "openai-compatible":
+            items.extend(
+                [
+                    LLMSettingItem(
+                        key="base_url",
+                        label="Base URL",
+                        value=self._llm_config.base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+                        description="OpenAI-compatible API endpoint.",
+                    ),
+                    LLMSettingItem(
+                        key="api_key",
+                        label="API Key",
+                        value=self._mask_secret(self._llm_config.api_key),
+                        description="Session-only secret. Enter to paste, '-' to clear.",
+                    ),
+                ]
+            )
+        else:
+            items.append(
+                LLMSettingItem(
+                    key="cli_bin",
+                    label="CLI Bin",
+                    value=self._llm_config.bin_path,
+                    description="CLI binary used by the generic exec provider.",
+                )
+            )
+        items.append(
+            LLMSettingItem(
+                key="status",
+                label="Status",
+                value="ready" if self._translator else "unavailable",
+                description=self._llm_error or "Natural-language translation is ready.",
+                editable=False,
+            )
+        )
+        items.append(
+            LLMSettingItem(
+                key="test_connection",
+                label="Test",
+                value="Run connection test",
+                description="Press Enter or 't' to validate the current provider settings.",
+                editable=False,
+            )
+        )
+        return items
 
     def _labels_for_section(self) -> list[str]:
         section = self._current_section()
@@ -216,6 +321,9 @@ class KubeAgentTUI:
                 event = record
                 prefix = f"{event.namespace}/" if self._all_namespaces else ""
                 labels.append(f"{event.type} | {event.reason} | {prefix}{event.obj}")
+            elif section == "LLM":
+                item = record
+                labels.append(f"{item.label:<12} {item.value}")
             else:
                 labels.append(str(record))
         return labels
@@ -297,6 +405,17 @@ class KubeAgentTUI:
             )
         if section == "Namespaces":
             return "Press Enter to switch the active namespace scope."
+        if section == "LLM":
+            item: LLMSettingItem = record
+            lines = [f"{item.label}: {item.value}", ""]
+            lines.extend(textwrap.wrap(item.description, 72))
+            if item.key == "provider":
+                lines.extend(["", f"Available providers: {', '.join(SUPPORTED_PROVIDERS)}"])
+            elif item.key == "api_key":
+                lines.extend(["", "The API key is stored only in this running Korix session."])
+            elif item.key == "status" and self._llm_error:
+                lines.extend(["", f"Current error: {self._llm_error}"])
+            return "\n".join(lines)
         return "\n".join(str(record) for record in records)
 
     def _render(self) -> None:
@@ -347,7 +466,8 @@ class KubeAgentTUI:
         context = self._truncate(self._context or "-", max(18, width // 3))
         summary = (
             f"context {context}  |  namespace {self._namespace_label()}  |  "
-            f"translator {'enabled' if self._translator else 'offline'}"
+            f"llm {self._llm_provider_summary()}  |  "
+            f"translation {'ready' if self._translator else 'offline'}"
         )
         self._safe_addnstr(top, left + 1, title, width - 2, self._attr("header", curses.A_BOLD))
         self._safe_addnstr(
@@ -444,7 +564,7 @@ class KubeAgentTUI:
 
     def _draw_footer(self, top: int, left: int, width: int, height: int) -> None:
         self._fill_rect(top, left, width, height, "footer")
-        help_line = "Tab switch focus  |  arrows move  |  Enter inspect  |  g refresh  |  C context  |  n namespace  |  : ask  |  q quit"
+        help_line = "Tab switch focus  |  arrows move  |  Enter inspect/edit  |  g refresh  |  C context  |  n namespace  |  : ask  |  t test llm  |  q quit"
         self._safe_addnstr(
             top, left + 1, self._truncate(help_line, width - 2), width - 2, self._attr("footer")
         )
@@ -559,6 +679,13 @@ class KubeAgentTUI:
         if section == "Events":
             status = "warning" if record.type == "Warning" else "ok"
             return self._status_attr(status, selected=False)
+        if section == "LLM":
+            if record.key == "status":
+                status = "ok" if record.value == "ready" else "critical"
+                return self._status_attr(status, selected=False)
+            if record.key == "test_connection":
+                return self._attr("accent", curses.A_BOLD)
+            return self._attr("panel")
         return self._attr("panel")
 
     def _handle_key(self, key: int) -> None:
@@ -584,6 +711,9 @@ class KubeAgentTUI:
             return
         if key in {ord("g"), ord("G")}:
             self.refresh()
+            return
+        if key in {ord("t"), ord("T")} and self._current_section() == "LLM":
+            self._test_llm_provider()
             return
         if key == ord("C"):
             self._change_context()
@@ -658,6 +788,28 @@ class KubeAgentTUI:
         self._status_text = "Ready."
         return text or default
 
+    def _prompt_secret(self, label: str) -> str:
+        height, width = self._stdscr.getmaxyx()
+        prompt = f"{label}: "
+        curses.noecho()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        self._stdscr.move(height - 1, 0)
+        self._stdscr.clrtoeol()
+        self._stdscr.addnstr(height - 1, 0, prompt, width - 1)
+        raw = self._stdscr.getstr(
+            height - 1, min(len(prompt), width - 1), max(1, width - len(prompt) - 1)
+        )
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        text = raw.decode("utf-8", errors="ignore").strip()
+        self._status_text = "Ready."
+        return text
+
     def _confirm(self, command_text: str) -> bool:
         answer = self._prompt_input(f"Run '{command_text}'? type yes to confirm", default="no")
         return answer.strip().lower() == "yes"
@@ -702,7 +854,9 @@ class KubeAgentTUI:
 
     def _run_natural_language(self) -> None:
         if not self._translator:
-            self._status_text = "Natural-language translation is unavailable."
+            self._status_text = (
+                "Natural-language translation is unavailable. Configure the LLM section."
+            )
             return
         request = self._prompt_input("Ask Korix")
         if not request:
@@ -720,7 +874,88 @@ class KubeAgentTUI:
         if self._current_section() == "Namespaces":
             self._set_selected_namespace()
             return
+        if self._current_section() == "LLM":
+            self._activate_llm_item()
+            return
         self._detail_text = self._detail_for_selection()
+
+    def _activate_llm_item(self) -> None:
+        records = self._records_for_section()
+        if not records:
+            return
+        item: LLMSettingItem = records[self._item_index]
+        if item.key == "provider":
+            provider = (
+                self._prompt_input(
+                    f"LLM provider ({'/'.join(SUPPORTED_PROVIDERS)})",
+                    default=self._llm_config.provider,
+                )
+                .strip()
+                .lower()
+            )
+            if provider not in SUPPORTED_PROVIDERS:
+                self._status_text = f"Unsupported provider: {provider}"
+                return
+            self._llm_config = replace(self._llm_config, provider=provider)
+            self._apply_llm_config("Provider updated.")
+            return
+        if item.key == "model":
+            model = self._prompt_input("LLM model", default=self._llm_config.model or "")
+            self._llm_config = replace(self._llm_config, model=model or None)
+            self._apply_llm_config("Model updated.")
+            return
+        if item.key == "base_url":
+            base_url = self._prompt_input(
+                "Base URL ('-' clears to default)",
+                default=self._llm_config.base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+            )
+            normalized = None if base_url.strip() == "-" else base_url.strip()
+            if normalized == DEFAULT_OPENAI_COMPATIBLE_BASE_URL:
+                normalized = None
+            self._llm_config = replace(self._llm_config, base_url=normalized)
+            self._apply_llm_config("Base URL updated.")
+            return
+        if item.key == "api_key":
+            api_key = self._prompt_secret("API key (leave blank to keep, '-' to clear)")
+            if not api_key:
+                self._status_text = "API key unchanged."
+                return
+            normalized = None if api_key == "-" else api_key
+            self._llm_config = replace(self._llm_config, api_key=normalized)
+            self._apply_llm_config("API key updated.")
+            return
+        if item.key == "cli_bin":
+            bin_path = self._prompt_input(
+                "LLM CLI binary", default=self._llm_config.bin_path
+            ).strip()
+            self._llm_config = replace(
+                self._llm_config, bin_path=bin_path or self._llm_config.bin_path
+            )
+            self._apply_llm_config("CLI binary updated.")
+            return
+        if item.key == "test_connection":
+            self._test_llm_provider()
+
+    def _apply_llm_config(self, message: str) -> None:
+        self._configure_translator()
+        if self._translator:
+            self._status_text = f"{message} LLM ready: {self._llm_provider_summary()}"
+        self._detail_text = self._detail_for_selection()
+
+    def _test_llm_provider(self) -> None:
+        try:
+            provider = build_provider(self._llm_config)
+            response = test_provider_connection(provider)
+            self._status_text = f"LLM connection ok: {self._llm_provider_summary()}"
+            self._detail_text = f"LLM connection test succeeded.\n\nProvider response:\n{response}"
+        except LLMError as exc:
+            self._status_text = f"LLM test failed: {exc}"
+            self._detail_text = f"LLM connection test failed.\n\n{exc}"
+
+    def _mask_secret(self, value: str | None) -> str:
+        if not value:
+            return "(not set)"
+        return "*" * 8
 
     def _set_selected_namespace(self) -> None:
         records = self._records_for_section()
@@ -833,4 +1068,4 @@ class KubeAgentTUI:
 
 
 def main() -> None:
-    KubeAgentTUI().run()
+    KorixTUI().run()

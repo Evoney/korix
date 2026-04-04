@@ -102,46 +102,46 @@ Section-specific keys:
 - Deployments: `d` describe, `r` rollout restart, `s` scale
 - Nodes: `d` describe, `c` cordon, `u` uncordon
 
-## Codex configuration
+## LLM configuration
 
-Natural-language translation uses the `codex` CLI. Configure offline mode with a
-local provider or use online mode with Codex cloud auth.
+Korix is provider-agnostic for natural-language translation.
 
-By default, the agent uses online mode.
+V1 providers:
 
-Offline mode:
+- `cli`
+- `openai-compatible`
+
+You can configure the active provider in the TUI under the `LLM` section.
+Korix lets you choose the provider and model there, and for hosted providers
+you can also paste the API key and base URL directly in the UI. API keys entered
+in the UI are kept in memory for the current session only.
+
+Environment variables are also supported as startup defaults:
 
 ```bash
-export KORIX_CODEX_LOCAL_PROVIDER=ollama   # or ollama-chat, lmstudio
-export KORIX_CODEX_MODEL=your-local-model  # optional
+export KORIX_LLM_PROVIDER=openai-compatible
+export KORIX_LLM_MODEL=gpt-4.1-mini
+export KORIX_LLM_BASE_URL=https://api.openai.com/v1
+export KORIX_LLM_API_KEY=your_api_key_here
+export KORIX_LLM_TIMEOUT=60
 ```
 
-Online mode:
+For CLI-based providers:
 
 ```bash
-export KORIX_CODEX_MODE=online
-```
-
-Auto mode (offline when local provider is set, otherwise online):
-
-```bash
-export KORIX_CODEX_MODE=auto
-```
-
-Optional overrides:
-
-```bash
-export KORIX_CODEX_BIN=/path/to/codex
-export KORIX_CODEX_TIMEOUT=60
-export KORIX_CODEX_OSS=1   # legacy toggle, prefer KORIX_CODEX_MODE
-export KORIX_CODEX_SKIP_GIT_REPO_CHECK=1
+export KORIX_LLM_PROVIDER=cli
+export KORIX_LLM_BIN=llm
+export KORIX_LLM_MODEL=your-local-model
+export KORIX_LLM_MODE=auto
+export KORIX_LLM_LOCAL_PROVIDER=ollama
+export KORIX_LLM_SKIP_GIT_REPO_CHECK=1
 ```
 
 ## Requirements
 
 - Python 3.11+
 - `kubectl` available on PATH
-- `codex` CLI available on PATH and authenticated (online) or configured with a local provider (offline) if you want the natural-language command box
+- an LLM provider configured if you want the natural-language command box
 
 ## Development
 
@@ -151,5 +151,29 @@ Run tests:
 python3 -m unittest discover -s tests
 ```
 
-The TUI can still start even if Codex translation is unavailable. In that case,
-the dashboard and explicit operator actions remain usable.
+The TUI can still start even if natural-language translation is unavailable. In
+that case, the dashboard and explicit operator actions remain usable.
+
+## Releases
+
+Korix publishes GitHub releases automatically when you push a version tag in
+the form `vX.Y.Z`.
+
+Release flow:
+
+1. Update `project.version` in `pyproject.toml`.
+2. Commit the version change.
+3. Create the tag from the checked-in version:
+
+```bash
+bash scripts/create-release-tag.sh --push
+```
+
+The helper script reads the version from `pyproject.toml`, requires a clean git
+worktree, creates an annotated tag like `v0.1.1`, and can push it to `origin`.
+
+When the tag reaches GitHub, the `Release` workflow:
+
+- validates that the tag matches `pyproject.toml`
+- runs `ruff`, `black --check`, unit tests, and `python -m build`
+- publishes a GitHub Release with the built wheel and source distribution

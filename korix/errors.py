@@ -1,14 +1,14 @@
-class KubeAgentError(RuntimeError):
+class KorixError(RuntimeError):
     """Base error for Korix failures."""
 
 
-class CodexError(KubeAgentError):
-    """Codex client failures."""
+class LLMError(KorixError):
+    """LLM provider failures."""
 
 
-class TranslationError(KubeAgentError):
+class TranslationError(KorixError):
     """Natural language translation failures."""
 
 
-class KubectlError(KubeAgentError):
+class KubectlError(KorixError):
     """kubectl command failures."""

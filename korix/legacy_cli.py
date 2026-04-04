@@ -2,18 +2,18 @@ import os
 import sys
 import textwrap
 
-from .codex_client import CodexClient
 from .commands import (
     build_kubectl_command,
     detect_action_from_args,
     is_mutating_command,
     render_command,
 )
-from .config import load_codex_config
+from .config import load_llm_config
 from .constants import DEFAULT_NAMESPACE
 from .domain import CommandSpec
-from .errors import CodexError, KubectlError, TranslationError
+from .errors import KubectlError, LLMError, TranslationError
 from .kubectl import KubectlClient
+from .llm import build_provider
 from .translation import Translator
 
 
@@ -110,8 +110,8 @@ def print_help():
           - Use '?' during namespace prompt to list namespaces.
           - Type 'kubectl ...' to run a raw kubectl command.
           - Type 'exit' to quit.
-          - Set KORIX_CODEX_MODE=online to use Codex cloud auth.
-          - Offline translation requires KORIX_CODEX_LOCAL_PROVIDER.
+          - Configure KORIX_LLM_* settings to enable natural-language translation.
+          - Hosted providers require model, provider, and API key configuration.
         """).strip())
 
 
@@ -134,9 +134,9 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        config = load_codex_config(os.environ)
-        translator = Translator(CodexClient(config))
-    except CodexError as exc:
+        config = load_llm_config(os.environ)
+        translator = Translator(build_provider(config))
+    except LLMError as exc:
         print(str(exc))
         sys.exit(1)
 

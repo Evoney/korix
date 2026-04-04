@@ -1,9 +1,9 @@
 import shlex
 import textwrap
 
-from .codex_client import CodexClient
 from .domain import CommandSpec
-from .errors import CodexError, TranslationError
+from .errors import LLMError, TranslationError
+from .llm import LLMProvider
 
 LLM_PROMPT = textwrap.dedent("""
     You are a CLI assistant that converts natural-language Kubernetes requests into a single kubectl command.
@@ -47,8 +47,8 @@ def extract_kubectl_line(output: str) -> str | None:
 
 
 class Translator:
-    def __init__(self, codex_client: CodexClient):
-        self._codex = codex_client
+    def __init__(self, provider: LLMProvider):
+        self._provider = provider
 
     def translate(self, text: str) -> CommandSpec:
         raw = text.strip()
@@ -64,12 +64,12 @@ class Translator:
             return CommandSpec(action="raw", args=args)
 
         try:
-            output = self._codex.run(f"{LLM_PROMPT}\n\nRequest: {raw}\n")
-        except CodexError as exc:
+            output = self._provider.run(f"{LLM_PROMPT}\n\nRequest: {raw}\n")
+        except LLMError as exc:
             raise TranslationError(str(exc)) from exc
         line = extract_kubectl_line(output)
         if not line:
-            raise TranslationError("Codex did not return a kubectl command.")
+            raise TranslationError("LLM provider did not return a kubectl command.")
         if line.startswith(ERROR_OUTPUT_PREFIX):
             reason = line[len(ERROR_OUTPUT_PREFIX) :].strip() or "Unable to translate request."
             raise TranslationError(reason)
@@ -78,5 +78,5 @@ class Translator:
         except ValueError as exc:
             raise TranslationError(f"Could not parse command: {exc}") from exc
         if not parts or parts[0] != "kubectl":
-            raise TranslationError("Codex returned a non-kubectl command.")
+            raise TranslationError("LLM provider returned a non-kubectl command.")
         return CommandSpec(action="raw", args=parts[1:])
