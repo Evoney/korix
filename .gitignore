@@ -13,3 +13,5 @@ dist/
 build/
 .idea/
 .vscode/
+docs/
+tasks/
