@@ -9,20 +9,36 @@ import (
 )
 
 var mutatingCommands = map[string]struct{}{
-	"annotate": {},
-	"apply":    {},
-	"cordon":   {},
-	"create":   {},
-	"delete":   {},
-	"drain":    {},
-	"edit":     {},
-	"label":    {},
-	"patch":    {},
-	"replace":  {},
-	"scale":    {},
-	"set":      {},
-	"taint":    {},
-	"uncordon": {},
+	"annotate":  {},
+	"apply":     {},
+	"attach":    {},
+	"autoscale": {},
+	"cordon":    {},
+	"cp":        {},
+	"create":    {},
+	"debug":     {},
+	"delete":    {},
+	"drain":     {},
+	"edit":      {},
+	"exec":      {},
+	"expose":    {},
+	"label":     {},
+	"patch":     {},
+	"replace":   {},
+	"run":       {},
+	"scale":     {},
+	"set":       {},
+	"taint":     {},
+	"uncordon":  {},
+}
+
+var mutatingRolloutSubcommands = []string{"pause", "restart", "resume", "undo"}
+
+// Global flags whose value may follow as a separate argument, e.g. `-n prod`.
+var valueFlags = map[string]struct{}{
+	"-n": {}, "--namespace": {}, "--context": {}, "--kubeconfig": {}, "--cluster": {},
+	"--user": {}, "-s": {}, "--server": {}, "--as": {}, "--as-group": {}, "--token": {},
+	"--request-timeout": {},
 }
 
 var shellControlTokens = map[string]struct{}{
@@ -93,13 +109,32 @@ func HasFlag(args []string, flags map[string]struct{}) bool {
 	return false
 }
 
-func FirstCommandArg(args []string) string {
+func positionalArgs(args []string) []string {
+	positionals := make([]string, 0, len(args))
+	skipNext := false
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") {
-			return arg
+		if skipNext {
+			skipNext = false
+			continue
 		}
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			_, skipNext = valueFlags[arg]
+			continue
+		}
+		positionals = append(positionals, arg)
 	}
-	return ""
+	return positionals
+}
+
+func FirstCommandArg(args []string) string {
+	positionals := positionalArgs(args)
+	if len(positionals) == 0 {
+		return ""
+	}
+	return positionals[0]
 }
 
 func ValidateTranslatedArgs(args []string) error {
@@ -126,13 +161,8 @@ func IsMutatingCommand(args []string) bool {
 		return true
 	}
 	if action == "rollout" {
-		nonFlags := make([]string, 0, len(args))
-		for _, arg := range args {
-			if !strings.HasPrefix(arg, "-") {
-				nonFlags = append(nonFlags, arg)
-			}
-		}
-		return len(nonFlags) >= 2 && slices.Contains([]string{"restart", "undo"}, nonFlags[1])
+		positionals := positionalArgs(args)
+		return len(positionals) >= 2 && slices.Contains(mutatingRolloutSubcommands, positionals[1])
 	}
 	return false
 }

@@ -8,18 +8,43 @@ SHELL_CONTROL_TOKENS = {";", "&&", "||", "|", ">", ">>", "<"}
 MUTATING_COMMANDS = {
     "annotate",
     "apply",
+    "attach",
+    "autoscale",
     "cordon",
+    "cp",
     "create",
+    "debug",
     "delete",
     "drain",
     "edit",
+    "exec",
+    "expose",
     "label",
     "patch",
     "replace",
+    "run",
     "scale",
     "set",
     "taint",
     "uncordon",
+}
+
+MUTATING_ROLLOUT_SUBCOMMANDS = {"pause", "restart", "resume", "undo"}
+
+# Global flags whose value may follow as a separate argument, e.g. `-n prod`.
+VALUE_FLAGS = {
+    "-n",
+    "--namespace",
+    "--context",
+    "--kubeconfig",
+    "--cluster",
+    "--user",
+    "-s",
+    "--server",
+    "--as",
+    "--as-group",
+    "--token",
+    "--request-timeout",
 }
 
 
@@ -36,11 +61,25 @@ def has_flag(args: Sequence[str], flags: Iterable[str]) -> bool:
     return False
 
 
-def first_command_arg(args: Sequence[str]) -> str | None:
+def positional_args(args: Sequence[str]) -> list[str]:
+    positionals: list[str] = []
+    skip_next = False
     for arg in args:
-        if not arg.startswith("-"):
-            return arg
-    return None
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--":
+            break
+        if arg.startswith("-"):
+            skip_next = arg in VALUE_FLAGS
+            continue
+        positionals.append(arg)
+    return positionals
+
+
+def first_command_arg(args: Sequence[str]) -> str | None:
+    positionals = positional_args(args)
+    return positionals[0] if positionals else None
 
 
 def is_plugin_command(args: Sequence[str]) -> bool:
@@ -92,10 +131,7 @@ def render_command(cmd: Sequence[str]) -> str:
 
 
 def detect_action_from_args(args: Sequence[str]) -> str:
-    for arg in args:
-        if not arg.startswith("-"):
-            return arg
-    return "raw"
+    return first_command_arg(args) or "raw"
 
 
 def validate_translated_args(args: Sequence[str]) -> None:
@@ -118,6 +154,6 @@ def is_mutating_command(args: Sequence[str]) -> bool:
     if action in MUTATING_COMMANDS:
         return True
     if action == "rollout":
-        non_flags = [arg for arg in args if not arg.startswith("-")]
-        return len(non_flags) >= 2 and non_flags[1] in {"restart", "undo"}
+        positionals = positional_args(args)
+        return len(positionals) >= 2 and positionals[1] in MUTATING_ROLLOUT_SUBCOMMANDS
     return False

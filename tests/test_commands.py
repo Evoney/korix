@@ -32,6 +32,36 @@ class CommandsTest(unittest.TestCase):
     def test_is_mutating_command_detects_rollout_undo(self):
         self.assertTrue(is_mutating_command(["rollout", "undo", "deployment", "api"]))
 
+    def test_is_mutating_command_detects_workload_and_shell_commands(self):
+        for args in (
+            ["run", "debug", "--image", "busybox"],
+            ["expose", "deployment", "api", "--port", "80"],
+            ["autoscale", "deployment", "api", "--max", "5"],
+            ["exec", "-it", "api", "--", "sh"],
+            ["cp", "api:/tmp/a", "./a"],
+            ["debug", "node/worker-1", "-it", "--image", "busybox"],
+            ["attach", "api"],
+            ["rollout", "pause", "deployment", "api"],
+            ["rollout", "resume", "deployment", "api"],
+        ):
+            with self.subTest(args=args):
+                self.assertTrue(is_mutating_command(args))
+        self.assertFalse(is_mutating_command(["rollout", "status", "deployment", "api"]))
+
+    def test_is_mutating_command_skips_leading_flag_values(self):
+        self.assertTrue(is_mutating_command(["-n", "prod", "delete", "pod", "api"]))
+        self.assertTrue(
+            is_mutating_command(["--context", "prod", "rollout", "undo", "deployment/api"])
+        )
+
+    def test_build_kubectl_command_does_not_treat_flag_value_as_plugin(self):
+        self.assertEqual(
+            build_kubectl_command(
+                ["-n", "observability", "get", "pods"], "prod", "payments", False
+            ),
+            ["kubectl", "--context", "prod", "-n", "observability", "get", "pods"],
+        )
+
     def test_validate_translated_args_rejects_shell_control(self):
         with self.assertRaises(ValueError):
             validate_translated_args(["get", "pods", ";", "delete", "pod", "api"])
