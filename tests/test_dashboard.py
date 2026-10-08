@@ -1,6 +1,17 @@
 import unittest
 
-from korix.dashboard import build_overview, parse_nodes, parse_pods, summarize_pod_status
+from korix.dashboard import (
+    build_overview,
+    parse_cronjobs,
+    parse_daemonsets,
+    parse_ingresses,
+    parse_jobs,
+    parse_nodes,
+    parse_pods,
+    parse_services,
+    parse_statefulsets,
+    summarize_pod_status,
+)
 
 
 class DashboardTest(unittest.TestCase):
@@ -121,6 +132,96 @@ class DashboardTest(unittest.TestCase):
         overview = build_overview(pods, [], nodes, [])
         self.assertEqual(overview[0].value, 1)
         self.assertEqual(overview[2].value, 0)
+
+    def test_parse_services_flags_pending_load_balancer(self):
+        rows = parse_services(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "web", "namespace": "prod"},
+                        "spec": {
+                            "type": "LoadBalancer",
+                            "clusterIP": "10.0.0.12",
+                            "ports": [{"port": 80, "targetPort": 8080, "protocol": "TCP"}],
+                        },
+                        "status": {"loadBalancer": {}},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(rows[0].external_ip, "<pending>")
+        self.assertIn("pending", rows[0].issue.lower())
+        self.assertEqual(rows[0].ports, "80->8080/TCP")
+
+    def test_parse_ingresses_flags_missing_address(self):
+        rows = parse_ingresses(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "edge", "namespace": "prod"},
+                        "spec": {"rules": [{"host": "api.example.com"}]},
+                        "status": {"loadBalancer": {}},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(rows[0].hosts, "api.example.com")
+        self.assertEqual(rows[0].issue, "No ingress address")
+
+    def test_parse_statefulsets_and_daemonsets_surface_unready_workloads(self):
+        statefulsets = parse_statefulsets(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "db", "namespace": "prod"},
+                        "spec": {"replicas": 3},
+                        "status": {"readyReplicas": 2},
+                    }
+                ]
+            }
+        )
+        daemonsets = parse_daemonsets(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "agent", "namespace": "prod"},
+                        "status": {"desiredNumberScheduled": 4, "numberReady": 3},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(statefulsets[0].ready, "2/3")
+        self.assertIn("Ready", statefulsets[0].issue)
+        self.assertEqual(daemonsets[0].ready, "3/4")
+        self.assertIn("below desired", daemonsets[0].issue)
+
+    def test_parse_jobs_and_cronjobs_summarize_status(self):
+        jobs = parse_jobs(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "migrate", "namespace": "prod"},
+                        "spec": {"completions": 1},
+                        "status": {"failed": 1, "succeeded": 0},
+                    }
+                ]
+            }
+        )
+        cronjobs = parse_cronjobs(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "backup", "namespace": "prod"},
+                        "spec": {"schedule": "*/5 * * * *", "suspend": True},
+                        "status": {"active": [{"name": "backup-1"}]},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(jobs[0].issue, "1 failed")
+        self.assertEqual(cronjobs[0].schedule, "*/5 * * * *")
+        self.assertEqual(cronjobs[0].active, 1)
+        self.assertEqual(cronjobs[0].issue, "Suspended")
 
 
 if __name__ == "__main__":

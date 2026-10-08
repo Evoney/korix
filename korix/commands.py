@@ -3,6 +3,8 @@ from collections.abc import Iterable, Sequence
 
 from .constants import ALL_NAMESPACE_FLAGS, BUILTIN_COMMANDS, CONTEXT_FLAGS, NAMESPACE_FLAGS
 
+SHELL_CONTROL_TOKENS = {";", "&&", "||", "|", ">", ">>", "<"}
+
 MUTATING_COMMANDS = {
     "annotate",
     "apply",
@@ -96,11 +98,26 @@ def detect_action_from_args(args: Sequence[str]) -> str:
     return "raw"
 
 
+def validate_translated_args(args: Sequence[str]) -> None:
+    if not args:
+        raise ValueError("LLM provider returned an empty kubectl command.")
+    for arg in args:
+        if arg in SHELL_CONTROL_TOKENS:
+            raise ValueError(
+                "LLM provider returned shell control syntax, not a single kubectl command."
+            )
+        if "\x00" in arg:
+            raise ValueError("LLM provider returned an invalid command argument.")
+    action = first_command_arg(args)
+    if not action:
+        raise ValueError("LLM provider returned flags without a kubectl subcommand.")
+
+
 def is_mutating_command(args: Sequence[str]) -> bool:
     action = detect_action_from_args(args)
     if action in MUTATING_COMMANDS:
         return True
     if action == "rollout":
         non_flags = [arg for arg in args if not arg.startswith("-")]
-        return len(non_flags) >= 2 and non_flags[1] == "restart"
+        return len(non_flags) >= 2 and non_flags[1] in {"restart", "undo"}
     return False

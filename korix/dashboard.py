@@ -36,6 +36,64 @@ class DeploymentRow:
 
 
 @dataclass(frozen=True)
+class ServiceRow:
+    namespace: str
+    name: str
+    type: str
+    cluster_ip: str
+    external_ip: str
+    ports: str
+    age: str
+    issue: str
+
+
+@dataclass(frozen=True)
+class IngressRow:
+    namespace: str
+    name: str
+    class_name: str
+    hosts: str
+    address: str
+    age: str
+    issue: str
+
+
+@dataclass(frozen=True)
+class WorkloadRow:
+    namespace: str
+    name: str
+    kind: str
+    ready: str
+    desired: int
+    age: str
+    issue: str
+
+
+@dataclass(frozen=True)
+class JobRow:
+    namespace: str
+    name: str
+    completions: str
+    succeeded: int
+    failed: int
+    duration: str
+    age: str
+    issue: str
+
+
+@dataclass(frozen=True)
+class CronJobRow:
+    namespace: str
+    name: str
+    schedule: str
+    suspend: bool
+    active: int
+    last_schedule: str
+    age: str
+    issue: str
+
+
+@dataclass(frozen=True)
 class NodeRow:
     name: str
     status: str
@@ -59,6 +117,12 @@ class DashboardSnapshot:
     overview: list[OverviewMetric] = field(default_factory=list)
     pods: list[PodRow] = field(default_factory=list)
     deployments: list[DeploymentRow] = field(default_factory=list)
+    services: list[ServiceRow] = field(default_factory=list)
+    ingresses: list[IngressRow] = field(default_factory=list)
+    statefulsets: list[WorkloadRow] = field(default_factory=list)
+    daemonsets: list[WorkloadRow] = field(default_factory=list)
+    jobs: list[JobRow] = field(default_factory=list)
+    cronjobs: list[CronJobRow] = field(default_factory=list)
     nodes: list[NodeRow] = field(default_factory=list)
     events: list[EventRow] = field(default_factory=list)
     namespaces: list[str] = field(default_factory=list)
@@ -75,6 +139,12 @@ class DashboardService:
         errors: dict[str, str] = {}
         pods: list[PodRow] = []
         deployments: list[DeploymentRow] = []
+        services: list[ServiceRow] = []
+        ingresses: list[IngressRow] = []
+        statefulsets: list[WorkloadRow] = []
+        daemonsets: list[WorkloadRow] = []
+        jobs: list[JobRow] = []
+        cronjobs: list[CronJobRow] = []
         nodes: list[NodeRow] = []
         events: list[EventRow] = []
         namespaces: list[str] = []
@@ -98,6 +168,74 @@ class DashboardService:
             deployments = parse_deployments(deployment_data)
         except KubectlError as exc:
             errors["deployments"] = str(exc)
+
+        try:
+            service_data = self._get_json(
+                ["get", "services", "-o", "json"],
+                context,
+                namespace,
+                all_namespaces,
+                namespaced=True,
+            )
+            services = parse_services(service_data)
+        except KubectlError as exc:
+            errors["services"] = str(exc)
+
+        try:
+            ingress_data = self._get_json(
+                ["get", "ingresses", "-o", "json"],
+                context,
+                namespace,
+                all_namespaces,
+                namespaced=True,
+            )
+            ingresses = parse_ingresses(ingress_data)
+        except KubectlError as exc:
+            errors["ingresses"] = str(exc)
+
+        try:
+            statefulset_data = self._get_json(
+                ["get", "statefulsets", "-o", "json"],
+                context,
+                namespace,
+                all_namespaces,
+                namespaced=True,
+            )
+            statefulsets = parse_statefulsets(statefulset_data)
+        except KubectlError as exc:
+            errors["statefulsets"] = str(exc)
+
+        try:
+            daemonset_data = self._get_json(
+                ["get", "daemonsets", "-o", "json"],
+                context,
+                namespace,
+                all_namespaces,
+                namespaced=True,
+            )
+            daemonsets = parse_daemonsets(daemonset_data)
+        except KubectlError as exc:
+            errors["daemonsets"] = str(exc)
+
+        try:
+            job_data = self._get_json(
+                ["get", "jobs", "-o", "json"], context, namespace, all_namespaces, namespaced=True
+            )
+            jobs = parse_jobs(job_data)
+        except KubectlError as exc:
+            errors["jobs"] = str(exc)
+
+        try:
+            cronjob_data = self._get_json(
+                ["get", "cronjobs", "-o", "json"],
+                context,
+                namespace,
+                all_namespaces,
+                namespaced=True,
+            )
+            cronjobs = parse_cronjobs(cronjob_data)
+        except KubectlError as exc:
+            errors["cronjobs"] = str(exc)
 
         try:
             node_data = self._get_json(
@@ -131,6 +269,12 @@ class DashboardService:
             overview=build_overview(pods, deployments, nodes, events),
             pods=pods,
             deployments=deployments,
+            services=services,
+            ingresses=ingresses,
+            statefulsets=statefulsets,
+            daemonsets=daemonsets,
+            jobs=jobs,
+            cronjobs=cronjobs,
             nodes=nodes,
             events=events,
             namespaces=namespaces,
@@ -198,6 +342,158 @@ def parse_deployments(payload: dict[str, object]) -> list[DeploymentRow]:
                 name=metadata.get("name", ""),
                 ready=f"{ready}/{desired}",
                 available=available,
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=lambda row: (row.issue == "Healthy", row.namespace, row.name))
+
+
+def parse_services(payload: dict[str, object]) -> list[ServiceRow]:
+    rows: list[ServiceRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        service_type = spec.get("type", "ClusterIP")
+        external_ip = service_external_ip(spec, status)
+        issue = "Healthy"
+        if service_type == "LoadBalancer" and external_ip == "<pending>":
+            issue = "LoadBalancer external IP pending"
+        rows.append(
+            ServiceRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                type=service_type,
+                cluster_ip=spec.get("clusterIP") or "-",
+                external_ip=external_ip,
+                ports=format_service_ports(spec.get("ports") or []),
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=lambda row: (row.issue == "Healthy", row.namespace, row.name))
+
+
+def parse_ingresses(payload: dict[str, object]) -> list[IngressRow]:
+    rows: list[IngressRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        hosts = ingress_hosts(spec)
+        address = ingress_address(status)
+        issue = "Healthy"
+        if hosts == "-":
+            issue = "No host rules"
+        elif address == "-":
+            issue = "No ingress address"
+        rows.append(
+            IngressRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                class_name=spec.get("ingressClassName") or "-",
+                hosts=hosts,
+                address=address,
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=lambda row: (row.issue == "Healthy", row.namespace, row.name))
+
+
+def parse_statefulsets(payload: dict[str, object]) -> list[WorkloadRow]:
+    rows: list[WorkloadRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        desired = int(spec.get("replicas", 0))
+        ready = int(status.get("readyReplicas", 0))
+        issue = "Healthy" if ready >= desired else "Ready replicas below desired"
+        rows.append(
+            WorkloadRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                kind="statefulset",
+                ready=f"{ready}/{desired}",
+                desired=desired,
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=workload_sort_key)
+
+
+def parse_daemonsets(payload: dict[str, object]) -> list[WorkloadRow]:
+    rows: list[WorkloadRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        status = item.get("status", {})
+        desired = int(status.get("desiredNumberScheduled", 0))
+        ready = int(status.get("numberReady", 0))
+        available = int(status.get("numberAvailable", ready))
+        issue = "Healthy"
+        if ready < desired:
+            issue = "Ready pods below desired"
+        elif available < desired:
+            issue = "Available pods below desired"
+        rows.append(
+            WorkloadRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                kind="daemonset",
+                ready=f"{ready}/{desired}",
+                desired=desired,
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=workload_sort_key)
+
+
+def parse_jobs(payload: dict[str, object]) -> list[JobRow]:
+    rows: list[JobRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        desired = int(spec.get("completions") or 1)
+        succeeded = int(status.get("succeeded", 0))
+        failed = int(status.get("failed", 0))
+        issue = summarize_job_issue(status, desired, succeeded, failed)
+        rows.append(
+            JobRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                completions=f"{succeeded}/{desired}",
+                succeeded=succeeded,
+                failed=failed,
+                duration=job_duration(status),
+                age=format_age(metadata.get("creationTimestamp")),
+                issue=issue,
+            )
+        )
+    return sorted(rows, key=lambda row: (row.issue == "Complete", row.namespace, row.name))
+
+
+def parse_cronjobs(payload: dict[str, object]) -> list[CronJobRow]:
+    rows: list[CronJobRow] = []
+    for item in payload.get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        active = len(status.get("active") or [])
+        suspend = bool(spec.get("suspend", False))
+        issue = "Suspended" if suspend else "Healthy"
+        rows.append(
+            CronJobRow(
+                namespace=metadata.get("namespace", "default"),
+                name=metadata.get("name", ""),
+                schedule=spec.get("schedule") or "-",
+                suspend=suspend,
+                active=active,
+                last_schedule=format_age(status.get("lastScheduleTime")),
                 age=format_age(metadata.get("creationTimestamp")),
                 issue=issue,
             )
@@ -340,6 +636,78 @@ def summarize_node(item: dict[str, object]) -> tuple[str, str]:
     return ready_status, issue
 
 
+def service_external_ip(spec: dict[str, object], status: dict[str, object]) -> str:
+    external_ips = spec.get("externalIPs") or []
+    if external_ips:
+        return ",".join(str(ip) for ip in external_ips)
+    load_balancer = status.get("loadBalancer") or {}
+    ingress = load_balancer.get("ingress") or []
+    addresses = [entry.get("ip") or entry.get("hostname") for entry in ingress]
+    addresses = [address for address in addresses if address]
+    if addresses:
+        return ",".join(addresses)
+    if spec.get("type") == "LoadBalancer":
+        return "<pending>"
+    return "-"
+
+
+def format_service_ports(ports: list[dict[str, object]]) -> str:
+    rendered: list[str] = []
+    for port in ports:
+        target = port.get("targetPort")
+        protocol = port.get("protocol", "TCP")
+        text = f"{port.get('port', '-')}"
+        node_port = port.get("nodePort")
+        if node_port:
+            text += f":{node_port}"
+        if target and target != port.get("port"):
+            text += f"->{target}"
+        rendered.append(f"{text}/{protocol}")
+    return ",".join(rendered) if rendered else "-"
+
+
+def ingress_hosts(spec: dict[str, object]) -> str:
+    hosts = [rule.get("host") for rule in spec.get("rules") or [] if rule.get("host")]
+    return ",".join(hosts) if hosts else "-"
+
+
+def ingress_address(status: dict[str, object]) -> str:
+    load_balancer = status.get("loadBalancer") or {}
+    ingress = load_balancer.get("ingress") or []
+    addresses = [entry.get("ip") or entry.get("hostname") for entry in ingress]
+    addresses = [address for address in addresses if address]
+    return ",".join(addresses) if addresses else "-"
+
+
+def summarize_job_issue(
+    status: dict[str, object], desired: int, succeeded: int, failed: int
+) -> str:
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Failed" and condition.get("status") == "True":
+            return condition.get("reason") or condition.get("message") or "Failed"
+        if condition.get("type") == "Complete" and condition.get("status") == "True":
+            return "Complete"
+    if failed:
+        return f"{failed} failed"
+    if succeeded >= desired:
+        return "Complete"
+    return "Running"
+
+
+def job_duration(status: dict[str, object]) -> str:
+    start_time = parse_timestamp(status.get("startTime", ""))
+    completion_time = parse_timestamp(status.get("completionTime", ""))
+    if not start_time:
+        return "-"
+    end_time = completion_time or datetime.now(UTC)
+    seconds = int((end_time - start_time).total_seconds())
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
 def extract_node_roles(labels: dict[str, str]) -> str:
     roles = []
     for label in labels:
@@ -368,7 +736,9 @@ def format_age(timestamp: str | None) -> str:
     return f"{total_seconds // 86400}d"
 
 
-def parse_timestamp(value: str) -> datetime | None:
+def parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -386,3 +756,7 @@ def pod_sort_key(row: PodRow) -> tuple[int, int, str, str]:
 def event_sort_key(row: EventRow) -> tuple[int, str, str]:
     severity_rank = 0 if row.type == "Warning" else 1
     return (severity_rank, row.age, row.reason)
+
+
+def workload_sort_key(row: WorkloadRow) -> tuple[bool, str, str]:
+    return (row.issue == "Healthy", row.namespace, row.name)

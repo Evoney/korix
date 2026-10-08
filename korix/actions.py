@@ -13,6 +13,7 @@ class ActionSpec:
     args: list[str]
     scope: ActionScope = "namespaced"
     requires_confirmation: bool = False
+    preview_only: bool = False
 
 
 def from_translated_command(args: Sequence[str]) -> ActionSpec:
@@ -45,11 +46,53 @@ def delete_pod(name: str) -> ActionSpec:
     )
 
 
-def rollout_restart_deployment(name: str) -> ActionSpec:
+def rollout_restart(kind: str, name: str) -> ActionSpec:
     return ActionSpec(
-        label=f"Restart deployment {name}",
-        args=["rollout", "restart", "deployment", name],
+        label=f"Restart {kind} {name}",
+        args=["rollout", "restart", kind, name],
         requires_confirmation=True,
+    )
+
+
+def rollout_restart_deployment(name: str) -> ActionSpec:
+    return rollout_restart("deployment", name)
+
+
+def rollout_status(kind: str, name: str) -> ActionSpec:
+    return ActionSpec(
+        label=f"Rollout status for {kind} {name}",
+        args=["rollout", "status", kind, name],
+    )
+
+
+def rollout_history(kind: str, name: str) -> ActionSpec:
+    return ActionSpec(
+        label=f"Rollout history for {kind} {name}",
+        args=["rollout", "history", kind, name],
+    )
+
+
+def rollout_undo(kind: str, name: str) -> ActionSpec:
+    return ActionSpec(
+        label=f"Rollout undo for {kind} {name}",
+        args=["rollout", "undo", kind, name],
+        requires_confirmation=True,
+    )
+
+
+def port_forward_resource(kind: str, name: str, mapping: str) -> ActionSpec:
+    return ActionSpec(
+        label=f"Port-forward {kind} {name}",
+        args=["port-forward", f"{kind}/{name}", mapping],
+        preview_only=True,
+    )
+
+
+def exec_pod(name: str, command: Sequence[str]) -> ActionSpec:
+    return ActionSpec(
+        label=f"Exec in pod {name}",
+        args=["exec", "-it", name, "--", *command],
+        preview_only=True,
     )
 
 

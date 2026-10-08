@@ -1,5 +1,6 @@
 import curses
 import os
+import shlex
 import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -9,9 +10,15 @@ from .actions import (
     cordon_node,
     delete_pod,
     describe_resource,
+    exec_pod,
     from_translated_command,
     logs_pod,
+    port_forward_resource,
+    rollout_history,
+    rollout_restart,
     rollout_restart_deployment,
+    rollout_status,
+    rollout_undo,
     scale_deployment,
     uncordon_node,
 )
@@ -19,13 +26,18 @@ from .commands import build_kubectl_command, build_scoped_command, render_comman
 from .config import LLMConfig, load_llm_config
 from .constants import DEFAULT_NAMESPACE
 from .dashboard import (
+    CronJobRow,
     DashboardService,
     DashboardSnapshot,
     DeploymentRow,
     EventRow,
+    IngressRow,
+    JobRow,
     NodeRow,
     OverviewMetric,
     PodRow,
+    ServiceRow,
+    WorkloadRow,
 )
 from .errors import KubectlError, LLMError, TranslationError
 from .kubectl import KubectlClient
@@ -41,10 +53,17 @@ SECTION_ORDER = [
     "Overview",
     "Pods",
     "Deployments",
+    "Services",
+    "Ingresses",
+    "StatefulSets",
+    "DaemonSets",
+    "Jobs",
+    "CronJobs",
     "Nodes",
     "Events",
     "Namespaces",
     "LLM",
+    "History",
     "Actions",
 ]
 
@@ -108,6 +127,7 @@ class KorixTUI:
         self._stdscr = None
         self._theme_ready = False
         self._theme_pairs: dict[str, int] = {}
+        self._command_history: list[str] = []
 
     def run(self) -> None:
         curses.wrapper(self._curses_main)
@@ -211,6 +231,18 @@ class KorixTUI:
             return self._snapshot.pods
         if section == "Deployments":
             return self._snapshot.deployments
+        if section == "Services":
+            return self._snapshot.services
+        if section == "Ingresses":
+            return self._snapshot.ingresses
+        if section == "StatefulSets":
+            return self._snapshot.statefulsets
+        if section == "DaemonSets":
+            return self._snapshot.daemonsets
+        if section == "Jobs":
+            return self._snapshot.jobs
+        if section == "CronJobs":
+            return self._snapshot.cronjobs
         if section == "Nodes":
             return self._snapshot.nodes
         if section == "Events":
@@ -221,6 +253,8 @@ class KorixTUI:
             return records
         if section == "LLM":
             return self._llm_items()
+        if section == "History":
+            return self._command_history or ["No commands yet"]
         return [
             "Enter inspect details",
             "g refresh data",
@@ -228,8 +262,14 @@ class KorixTUI:
             "n switch namespace scope",
             ": natural-language command preview",
             "LLM: configure provider, model, endpoint, api key, test connection",
-            "Pods: d describe, l logs, p previous logs, x delete pod",
-            "Deployments: d describe, r restart, s scale",
+            (
+                "Pods: d describe, l logs, p previous logs, e exec preview, "
+                "f port-forward preview, x delete pod"
+            ),
+            "Deployments: d describe, r restart, s scale, o status, h history, u undo",
+            "Services: d describe, f port-forward preview",
+            "StatefulSets/DaemonSets: d describe, r restart, o status, h history, u undo",
+            "Ingresses/Jobs/CronJobs: d describe",
             "Nodes: d describe, c cordon, u uncordon",
             "q quit",
         ]
@@ -306,13 +346,48 @@ class KorixTUI:
                 pod = record
                 prefix = f"{pod.namespace}/" if self._all_namespaces else ""
                 labels.append(
-                    f"{prefix}{pod.name} | {pod.status} | ready {pod.ready} | restarts {pod.restarts}"
+                    f"{prefix}{pod.name} | {pod.status} | ready {pod.ready} | "
+                    f"restarts {pod.restarts}"
                 )
             elif section == "Deployments":
                 deployment = record
                 prefix = f"{deployment.namespace}/" if self._all_namespaces else ""
                 labels.append(
                     f"{prefix}{deployment.name} | ready {deployment.ready} | {deployment.issue}"
+                )
+            elif section == "Services":
+                service = record
+                prefix = f"{service.namespace}/" if self._all_namespaces else ""
+                labels.append(
+                    f"{prefix}{service.name} | {service.type} | {service.external_ip} | "
+                    f"{service.ports}"
+                )
+            elif section == "Ingresses":
+                ingress = record
+                prefix = f"{ingress.namespace}/" if self._all_namespaces else ""
+                labels.append(
+                    f"{prefix}{ingress.name} | {ingress.hosts} | {ingress.address} | "
+                    f"{ingress.issue}"
+                )
+            elif section in {"StatefulSets", "DaemonSets"}:
+                workload = record
+                prefix = f"{workload.namespace}/" if self._all_namespaces else ""
+                labels.append(
+                    f"{prefix}{workload.name} | ready {workload.ready} | {workload.issue}"
+                )
+            elif section == "Jobs":
+                job = record
+                prefix = f"{job.namespace}/" if self._all_namespaces else ""
+                labels.append(
+                    f"{prefix}{job.name} | complete {job.completions} | "
+                    f"failed {job.failed} | {job.issue}"
+                )
+            elif section == "CronJobs":
+                cronjob = record
+                prefix = f"{cronjob.namespace}/" if self._all_namespaces else ""
+                labels.append(
+                    f"{prefix}{cronjob.name} | {cronjob.schedule} | "
+                    f"active {cronjob.active} | {cronjob.issue}"
                 )
             elif section == "Nodes":
                 node = record
@@ -324,6 +399,8 @@ class KorixTUI:
             elif section == "LLM":
                 item = record
                 labels.append(f"{item.label:<12} {item.value}")
+            elif section == "History":
+                labels.append(str(record))
             else:
                 labels.append(str(record))
         return labels
@@ -363,7 +440,10 @@ class KorixTUI:
                     f"Age: {pod.age}",
                     f"Issue: {pod.issue}",
                     "",
-                    "Keys: d describe | l logs | p previous logs | x delete",
+                    (
+                        "Keys: d describe | l logs | p previous logs | e exec preview | "
+                        "f port-forward preview | x delete"
+                    ),
                 ]
             )
         if section == "Deployments":
@@ -376,7 +456,82 @@ class KorixTUI:
                     f"Age: {deployment.age}",
                     f"Issue: {deployment.issue}",
                     "",
-                    "Keys: d describe | r rollout restart | s scale",
+                    (
+                        "Keys: d describe | r restart | s scale | o rollout status | "
+                        "h history | u undo"
+                    ),
+                ]
+            )
+        if section == "Services":
+            service: ServiceRow = record
+            return "\n".join(
+                [
+                    f"Service: {service.namespace}/{service.name}",
+                    f"Type: {service.type}",
+                    f"Cluster IP: {service.cluster_ip}",
+                    f"External IP: {service.external_ip}",
+                    f"Ports: {service.ports}",
+                    f"Age: {service.age}",
+                    f"Issue: {service.issue}",
+                    "",
+                    "Keys: d describe | f port-forward preview",
+                ]
+            )
+        if section == "Ingresses":
+            ingress: IngressRow = record
+            return "\n".join(
+                [
+                    f"Ingress: {ingress.namespace}/{ingress.name}",
+                    f"Class: {ingress.class_name}",
+                    f"Hosts: {ingress.hosts}",
+                    f"Address: {ingress.address}",
+                    f"Age: {ingress.age}",
+                    f"Issue: {ingress.issue}",
+                    "",
+                    "Keys: d describe",
+                ]
+            )
+        if section in {"StatefulSets", "DaemonSets"}:
+            workload: WorkloadRow = record
+            return "\n".join(
+                [
+                    f"{workload.kind.title()}: {workload.namespace}/{workload.name}",
+                    f"Ready: {workload.ready}",
+                    f"Desired: {workload.desired}",
+                    f"Age: {workload.age}",
+                    f"Issue: {workload.issue}",
+                    "",
+                    "Keys: d describe | r restart | o rollout status | h history | u undo",
+                ]
+            )
+        if section == "Jobs":
+            job: JobRow = record
+            return "\n".join(
+                [
+                    f"Job: {job.namespace}/{job.name}",
+                    f"Completions: {job.completions}",
+                    f"Succeeded: {job.succeeded}",
+                    f"Failed: {job.failed}",
+                    f"Duration: {job.duration}",
+                    f"Age: {job.age}",
+                    f"Issue: {job.issue}",
+                    "",
+                    "Keys: d describe",
+                ]
+            )
+        if section == "CronJobs":
+            cronjob: CronJobRow = record
+            return "\n".join(
+                [
+                    f"CronJob: {cronjob.namespace}/{cronjob.name}",
+                    f"Schedule: {cronjob.schedule}",
+                    f"Suspended: {cronjob.suspend}",
+                    f"Active jobs: {cronjob.active}",
+                    f"Last schedule: {cronjob.last_schedule}",
+                    f"Age: {cronjob.age}",
+                    f"Issue: {cronjob.issue}",
+                    "",
+                    "Keys: d describe",
                 ]
             )
         if section == "Nodes":
@@ -405,6 +560,8 @@ class KorixTUI:
             )
         if section == "Namespaces":
             return "Press Enter to switch the active namespace scope."
+        if section == "History":
+            return str(record)
         if section == "LLM":
             item: LLMSettingItem = record
             lines = [f"{item.label}: {item.value}", ""]
@@ -564,7 +721,10 @@ class KorixTUI:
 
     def _draw_footer(self, top: int, left: int, width: int, height: int) -> None:
         self._fill_rect(top, left, width, height, "footer")
-        help_line = "Tab switch focus  |  arrows move  |  Enter inspect/edit  |  g refresh  |  C context  |  n namespace  |  : ask  |  t test llm  |  q quit"
+        help_line = (
+            "Tab/arrows move  |  d describe  |  f port-forward  |  e exec  |  "
+            "o status  |  h history  |  : ask  |  q quit"
+        )
         self._safe_addnstr(
             top, left + 1, self._truncate(help_line, width - 2), width - 2, self._attr("footer")
         )
@@ -671,6 +831,12 @@ class KorixTUI:
         if section == "Deployments":
             status = "healthy" if record.issue == "Healthy" else "warning"
             return self._status_attr(status, selected=False)
+        if section in {"Services", "Ingresses", "StatefulSets", "DaemonSets", "CronJobs"}:
+            status = "healthy" if record.issue == "Healthy" else "warning"
+            return self._status_attr(status, selected=False)
+        if section == "Jobs":
+            status = "healthy" if record.issue == "Complete" else "warning"
+            return self._status_attr(status, selected=False)
         if section == "Nodes":
             status = (
                 "ready" if record.status == "Ready" and record.issue == "Healthy" else "critical"
@@ -740,7 +906,19 @@ class KorixTUI:
             self._delete_selected_pod()
             return
         if key == ord("r"):
-            self._restart_selected_deployment()
+            self._restart_selected_workload()
+            return
+        if key == ord("o"):
+            self._rollout_status_selected_workload()
+            return
+        if key == ord("h"):
+            self._rollout_history_selected_workload()
+            return
+        if key == ord("f"):
+            self._port_forward_selected_resource()
+            return
+        if key == ord("e"):
+            self._exec_selected_pod()
             return
         if key == ord("s"):
             self._scale_selected_deployment()
@@ -749,7 +927,10 @@ class KorixTUI:
             self._cordon_selected_node()
             return
         if key == ord("u"):
-            self._uncordon_selected_node()
+            if self._current_section() == "Nodes":
+                self._uncordon_selected_node()
+            else:
+                self._rollout_undo_selected_workload()
             return
 
     def _move_selection(self, delta: int) -> None:
@@ -868,7 +1049,7 @@ class KorixTUI:
             self._detail_text = str(exc)
             self._status_text = "Translation failed."
             return
-        self._execute_action(from_translated_command(spec.args))
+        self._execute_action(from_translated_command(spec.args), source=request)
 
     def _inspect_default(self) -> None:
         if self._current_section() == "Namespaces":
@@ -979,12 +1160,10 @@ class KorixTUI:
         if not records:
             return
         selected = records[self._item_index]
-        if section == "Pods":
-            self._execute_action(describe_resource("pod", selected.name))
-        elif section == "Deployments":
-            self._execute_action(describe_resource("deployment", selected.name))
-        elif section == "Nodes":
-            self._execute_action(describe_resource("node", selected.name, namespaced=False))
+        kind = self._selected_resource_kind()
+        if not kind:
+            return
+        self._execute_action(describe_resource(kind, selected.name, namespaced=section != "Nodes"))
 
     def _show_logs(self, previous: bool) -> None:
         if self._current_section() != "Pods" or not self._records_for_section():
@@ -998,11 +1177,64 @@ class KorixTUI:
         pod = self._records_for_section()[self._item_index]
         self._execute_action(delete_pod(pod.name))
 
-    def _restart_selected_deployment(self) -> None:
-        if self._current_section() != "Deployments" or not self._records_for_section():
+    def _restart_selected_workload(self) -> None:
+        if not self._records_for_section():
             return
-        deployment = self._records_for_section()[self._item_index]
-        self._execute_action(rollout_restart_deployment(deployment.name))
+        if self._current_section() == "Deployments":
+            deployment = self._records_for_section()[self._item_index]
+            self._execute_action(rollout_restart_deployment(deployment.name))
+            return
+        kind = self._selected_rollout_kind()
+        if not kind:
+            return
+        selected = self._records_for_section()[self._item_index]
+        self._execute_action(rollout_restart(kind, selected.name))
+
+    def _rollout_status_selected_workload(self) -> None:
+        kind = self._selected_rollout_kind(include_deployments=True)
+        if not kind or not self._records_for_section():
+            return
+        selected = self._records_for_section()[self._item_index]
+        self._execute_action(rollout_status(kind, selected.name))
+
+    def _rollout_history_selected_workload(self) -> None:
+        kind = self._selected_rollout_kind(include_deployments=True)
+        if not kind or not self._records_for_section():
+            return
+        selected = self._records_for_section()[self._item_index]
+        self._execute_action(rollout_history(kind, selected.name))
+
+    def _rollout_undo_selected_workload(self) -> None:
+        kind = self._selected_rollout_kind(include_deployments=True)
+        if not kind or not self._records_for_section():
+            return
+        selected = self._records_for_section()[self._item_index]
+        self._execute_action(rollout_undo(kind, selected.name))
+
+    def _port_forward_selected_resource(self) -> None:
+        section = self._current_section()
+        if section not in {"Pods", "Services"} or not self._records_for_section():
+            return
+        selected = self._records_for_section()[self._item_index]
+        default = "8080:80" if section == "Services" else "8080:8080"
+        mapping = self._prompt_input("Local:remote port", default=default)
+        kind = "service" if section == "Services" else "pod"
+        self._execute_action(port_forward_resource(kind, selected.name, mapping))
+
+    def _exec_selected_pod(self) -> None:
+        if self._current_section() != "Pods" or not self._records_for_section():
+            return
+        pod = self._records_for_section()[self._item_index]
+        command_text = self._prompt_input("Exec command", default="sh")
+        try:
+            command = shlex.split(command_text)
+        except ValueError as exc:
+            self._status_text = f"Invalid exec command: {exc}"
+            return
+        if not command:
+            self._status_text = "Exec command cancelled."
+            return
+        self._execute_action(exec_pod(pod.name, command))
 
     def _scale_selected_deployment(self) -> None:
         if self._current_section() != "Deployments" or not self._records_for_section():
@@ -1030,7 +1262,34 @@ class KorixTUI:
         node = self._records_for_section()[self._item_index]
         self._execute_action(uncordon_node(node.name))
 
-    def _execute_action(self, action: ActionSpec) -> None:
+    def _selected_resource_kind(self) -> str | None:
+        return {
+            "Pods": "pod",
+            "Deployments": "deployment",
+            "Services": "service",
+            "Ingresses": "ingress",
+            "StatefulSets": "statefulset",
+            "DaemonSets": "daemonset",
+            "Jobs": "job",
+            "CronJobs": "cronjob",
+            "Nodes": "node",
+        }.get(self._current_section())
+
+    def _selected_rollout_kind(self, include_deployments: bool = False) -> str | None:
+        kinds = {
+            "StatefulSets": "statefulset",
+            "DaemonSets": "daemonset",
+        }
+        if include_deployments:
+            kinds["Deployments"] = "deployment"
+        return kinds.get(self._current_section())
+
+    def _remember_command(self, command_text: str, source: str | None = None) -> None:
+        entry = command_text if not source else f"{source} -> {command_text}"
+        self._command_history.insert(0, entry)
+        del self._command_history[25:]
+
+    def _execute_action(self, action: ActionSpec, source: str | None = None) -> None:
         if action.scope == "cluster":
             cmd = build_scoped_command(
                 action.args, self._context, self._namespace, self._all_namespaces, namespaced=False
@@ -1045,6 +1304,17 @@ class KorixTUI:
             )
 
         command_text = render_command(cmd)
+        self._remember_command(command_text, source=source)
+        if action.preview_only:
+            self._status_text = f"Command preview ready: {action.label}"
+            self._detail_text = "\n".join(
+                [
+                    f"$ {command_text}",
+                    "",
+                    "Preview only. Run this command in a separate terminal if needed.",
+                ]
+            )
+            return
         if action.requires_confirmation and not self._confirm(command_text):
             self._status_text = "Action cancelled."
             self._detail_text = f"Skipped:\n{command_text}"

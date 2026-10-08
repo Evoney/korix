@@ -1,6 +1,7 @@
 import shlex
 import textwrap
 
+from .commands import validate_translated_args
 from .domain import CommandSpec
 from .errors import LLMError, TranslationError
 from .llm import LLMProvider
@@ -79,4 +80,9 @@ class Translator:
             raise TranslationError(f"Could not parse command: {exc}") from exc
         if not parts or parts[0] != "kubectl":
             raise TranslationError("LLM provider returned a non-kubectl command.")
-        return CommandSpec(action="raw", args=parts[1:])
+        args = parts[1:]
+        try:
+            validate_translated_args(args)
+        except ValueError as exc:
+            raise TranslationError(str(exc)) from exc
+        return CommandSpec(action="raw", args=args)
