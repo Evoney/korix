@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,24 +47,73 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Build distributions
         run: python -m build
-      - name: Upload release artifacts
+      - name: Upload Python release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: korix-dist
           path: dist/*
 
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: korix-go-linux-amd64
+          - goos: darwin
+            goarch: amd64
+            artifact: korix-go-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: korix-go-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: Check module files are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Go tests
+        run: go test ./...
+      - name: Build Go binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.artifact }}" ./cmd/korix-go
+      - name: Upload Go release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
   release:
-    needs: verify
+    needs:
+      - python
+      - go
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Download verified artifacts
+      - name: Download Python artifacts
         uses: actions/download-artifact@v4
         with:
           name: korix-dist
           path: dist
+      - name: Download Go artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: korix-go-*
+          path: dist
+          merge-multiple: true
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

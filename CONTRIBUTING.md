@@ -6,7 +6,8 @@ Korix uses a main-based workflow. `main` is the only long-lived branch, and chan
 
 ## Development Setup
 
-Korix currently targets Python 3.11+.
+Korix currently targets Python 3.11+. A parallel Go port is also available
+under `cmd/korix-go` and targets Go 1.24+.
 
 Typical local setup:
 
@@ -24,6 +25,13 @@ If you are working on code changes, run the local checks before opening a pull r
 .venv/bin/python -m black --check korix tests
 python3 -m unittest discover -s tests
 .venv/bin/python -m build
+```
+
+For Go changes, run these checks when Go 1.24+ is installed:
+
+```bash
+go test ./...
+go run ./cmd/korix-go
 ```
 
 ## How to Contribute
